@@ -54,6 +54,21 @@ pip install .
 python dockershield.py nginx:latest
 ```
 
+### 🐳 Docker Hub
+
+```bash
+# Pull from Docker Hub
+docker pull krishna8688/dockershield:v2.0
+
+# Run directly from Docker Hub (scan any image)
+docker run --rm -v /var/run/docker.sock:/var/run/docker.sock krishna8688/dockershield:v2.0 nginx:latest
+
+# With --block flag for CI/CD
+docker run --rm -v /var/run/docker.sock:/var/run/docker.sock krishna8688/dockershield:v2.0 myapp:latest --block
+```
+
+> **Docker Hub:** [hub.docker.com/r/krishna8688/dockershield](https://hub.docker.com/r/krishna8688/dockershield)
+
 ### With options
 
 ```bash
