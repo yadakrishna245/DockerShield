@@ -1,0 +1,51 @@
+name: DockerShield Scan
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      image:
+        description: "Docker image to scan"
+        required: true
+        default: "nginx:latest"
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run DockerShield scan
+        run: |
+          IMAGE="${{ github.event.inputs.image || 'nginx:latest' }}"
+          python dockershield.py "$IMAGE" --severity medium --html report.html
+        continue-on-error: true
+
+      - name: Upload HTML report
+        uses: actions/upload-artifact@v4
+        with:
+          name: dockershield-report
+          path: report.html
+
+      - name: Run scan (JSON)
+        run: |
+          IMAGE="${{ github.event.inputs.image || 'nginx:latest' }}"
+          python dockershield.py "$IMAGE" --json > scan-results.json
+        continue-on-error: true
+
+      - name: Upload JSON report
+        uses: actions/upload-artifact@v4
+        with:
+          name: dockershield-json
+          path: scan-results.json

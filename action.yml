@@ -1,0 +1,58 @@
+name: "DockerShield Scanner"
+description: "Scan Docker images for CVEs, secrets, malware, misconfigurations, and supply chain risks"
+author: "Krishna Chaithanya Yada"
+
+branding:
+  icon: "shield"
+  color: "blue"
+
+inputs:
+  image:
+    description: "Docker image to scan"
+    required: true
+  severity:
+    description: "Minimum severity to report (critical, high, medium, low)"
+    required: false
+    default: "medium"
+  fail-on:
+    description: "Fail if findings at this severity or above"
+    required: false
+    default: "high"
+  output-format:
+    description: "Output format: text, json, html"
+    required: false
+    default: "text"
+
+outputs:
+  findings-count:
+    description: "Total number of findings"
+  critical-count:
+    description: "Number of critical findings"
+  report-path:
+    description: "Path to generated report file"
+
+runs:
+  using: "composite"
+  steps:
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.12"
+
+    - name: Install DockerShield
+      shell: bash
+      run: pip install -r ${{ github.action_path }}/requirements.txt
+
+    - name: Run scan
+      shell: bash
+      run: |
+        ARGS="${{ inputs.image }} --severity ${{ inputs.severity }}"
+        if [ "${{ inputs.output-format }}" = "json" ]; then
+          python ${{ github.action_path }}/dockershield.py $ARGS --json > dockershield-report.json
+          echo "report-path=dockershield-report.json" >> $GITHUB_OUTPUT
+        elif [ "${{ inputs.output-format }}" = "html" ]; then
+          python ${{ github.action_path }}/dockershield.py $ARGS --html dockershield-report.html
+          echo "report-path=dockershield-report.html" >> $GITHUB_OUTPUT
+        else
+          python ${{ github.action_path }}/dockershield.py $ARGS
+        fi

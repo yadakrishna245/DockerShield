@@ -1,0 +1,63 @@
+{
+  "tool": "DockerShield",
+  "version": "1.0.0",
+  "image": "nginx:latest",
+  "scan_time": "2026-06-23T11:30:00.000000",
+  "summary": {
+    "total": 6,
+    "critical": 1,
+    "high": 2,
+    "medium": 2,
+    "low": 1
+  },
+  "findings": [
+    {
+      "category": "CVE",
+      "severity": "critical",
+      "title": "CVE-2022-25235 - libexpat",
+      "description": "Vulnerable package 'libexpat' detected. Fixed in 2.4.5.",
+      "remediation": "Update libexpat to version >= 2.4.5",
+      "timestamp": "2026-06-23T11:30:00.000000"
+    },
+    {
+      "category": "Misconfiguration",
+      "severity": "high",
+      "title": "Container runs as root",
+      "description": "No USER directive; container runs as root by default.",
+      "remediation": "Add USER directive: USER nonroot:nonroot",
+      "timestamp": "2026-06-23T11:30:00.000000"
+    },
+    {
+      "category": "Secrets",
+      "severity": "high",
+      "title": "Sensitive file: /app/.env",
+      "description": "Potentially sensitive file found: /app/.env",
+      "remediation": "Remove sensitive files or use multi-stage builds",
+      "timestamp": "2026-06-23T11:30:00.000000"
+    },
+    {
+      "category": "Misconfiguration",
+      "severity": "medium",
+      "title": "No HEALTHCHECK defined",
+      "description": "Image has no HEALTHCHECK instruction.",
+      "remediation": "Add HEALTHCHECK instruction to Dockerfile",
+      "timestamp": "2026-06-23T11:30:00.000000"
+    },
+    {
+      "category": "Supply Chain",
+      "severity": "medium",
+      "title": "Using 'latest' tag",
+      "description": "'latest' tag is mutable and can change unexpectedly.",
+      "remediation": "Pin to specific version tags or SHA256 digests",
+      "timestamp": "2026-06-23T11:30:00.000000"
+    },
+    {
+      "category": "Supply Chain",
+      "severity": "low",
+      "title": "Image is 120 days old",
+      "description": "Created 120 days ago; may lack recent patches.",
+      "remediation": "Rebuild images regularly for security patches",
+      "timestamp": "2026-06-23T11:30:00.000000"
+    }
+  ]
+}
