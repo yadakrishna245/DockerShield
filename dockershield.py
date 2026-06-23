@@ -96,18 +96,17 @@ class DockerShield:
 
     def pull_and_inspect(self):
         """Pull image and get inspection data."""
-        console.print(f"[bold blue]Pulling image:[/] {self.image_name}")
+        # Try local first
         try:
-            self.image = self.client.images.pull(self.image_name)
+            self.image = self.client.images.get(self.image_name)
+            console.print(f"[bold blue]Using local image:[/] {self.image_name}")
         except docker.errors.ImageNotFound:
-            console.print(f"[red]Image not found: {self.image_name}[/]")
-            sys.exit(1)
-        except docker.errors.APIError:
+            console.print(f"[bold blue]Pulling image:[/] {self.image_name}")
             try:
-                self.image = self.client.images.get(self.image_name)
-                console.print("[yellow]Using local image[/]")
-            except docker.errors.ImageNotFound:
-                console.print(f"[red]Cannot pull or find image: {self.image_name}[/]")
+                self.image = self.client.images.pull(self.image_name)
+            except Exception as e:
+                console.print(f"[red]Cannot find or pull image: {self.image_name}[/]")
+                console.print(f"[red]Error: {e}[/]")
                 sys.exit(1)
         self.inspect_data = self.client.api.inspect_image(self.image_name)
 
