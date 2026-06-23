@@ -9,6 +9,21 @@
 
 ---
 
+## 🚀 v2.0 — Anti Tag-Poisoning Edition
+
+### New in v2.0
+
+| Feature | Description |
+|---------|-------------|
+| 🔒 **Digest Verification** | Detects tag poisoning by tracking SHA256 digests in a local trust store (`~/.dockershield/trusted_digests.json`). Alerts if image content changes between scans. |
+| 🏷️ **Tag Mutation Detection** | Queries Docker Hub API to detect recently modified mutable tags (`:latest`, `:stable`). Flags images updated within 24 hours as potential attacks. |
+| 🌐 **Network Threat Detection** | Scans for known mining pool domains, suspicious DNS entries, and curl/wget downloading executables in build layers. |
+| 🩹 **SSL False Positive Fix** | Excludes `/etc/ssl/certs/` and `/usr/share/ca-certificates/` from secret file detection — no more false positives on standard certs. |
+| 📊 **Risk Score (0-100)** | Aggregated risk score with one-line recommendation and scan duration. |
+| 🚫 **`--block` Flag** | CI/CD gate: prints `DEPLOYMENT BLOCKED` in red and fails the pipeline if critical/high findings exist. |
+
+---
+
 ## ✨ Features
 
 | Check | What it detects |
@@ -17,7 +32,9 @@
 | 🔑 **Secret Detection** | AWS keys, GitHub tokens, private keys, passwords in ENV/layers |
 | 🦠 **Malware Signatures** | Crypto miners (xmrig, minerd), reverse shells, suspicious crons |
 | ⚙️ **Misconfiguration** | Running as root, sensitive ports, no healthcheck, bloated images |
-| 🔗 **Supply Chain** | Untrusted registries, unsigned images, stale builds, `latest` tag |
+| 🔗 **Supply Chain** | Untrusted registries, unsigned images, stale builds, `latest` tag, tag mutation |
+| 🔒 **Digest Integrity** | Tag poisoning detection via SHA256 digest tracking across scans |
+| 🌐 **Network Threats** | Mining pool domains, suspicious DNS, malicious downloads in layers |
 
 ---
 
@@ -48,6 +65,9 @@ python dockershield.py myapp:v2.1 --html report.html
 
 # Filter by severity
 python dockershield.py myapp:v2.1 --severity high
+
+# CI/CD pipeline gate - blocks deployment on critical/high findings
+python dockershield.py myapp:v2.1 --block
 ```
 
 ### Docker run
@@ -73,14 +93,16 @@ docker run --rm -v /var/run/docker.sock:/var/run/docker.sock dockershield nginx:
 
 ```
 ╔══════════════════════════════════════════╗
-║ DockerShield v1.0.0                      ║
+║ DockerShield v2.0.0                      ║
 ║ Scanning: nginx:latest                   ║
 ╚══════════════════════════════════════════╝
-  [1/5] Scanning for CVEs...
-  [2/5] Scanning for secrets...
-  [3/5] Scanning for malware...
-  [4/5] Scanning for misconfigurations...
-  [5/5] Scanning supply chain...
+  [1/7] Scanning for CVEs...
+  [2/7] Scanning for secrets...
+  [3/7] Scanning for malware...
+  [4/7] Scanning for misconfigurations...
+  [5/7] Scanning supply chain...
+  [6/7] Verifying digest integrity...
+  [7/7] Scanning for network threats...
 
 ╭──────────────────────────────────────────────────────────────────╮
 │ Category         │ Severity │ Finding              │ Remediation │
@@ -91,6 +113,8 @@ docker run --rm -v /var/run/docker.sock:/var/run/docker.sock dockershield nginx:
 ╰──────────────────────────────────────────────────────────────────╯
 
   Status: FAIL | Total: 3 | Critical: 1 High: 1 Medium: 1 Low: 0
+  Risk Score: 48/100 | Duration: 12.3s
+  Recommendation: High risk. Address critical/high findings before deployment.
 ```
 
 ---

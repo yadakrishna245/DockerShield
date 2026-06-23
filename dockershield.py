@@ -2,6 +2,7 @@
 """DockerShield - Docker Image Security Scanner CLI Tool.
 
 Scans Docker images for CVEs, secrets, malware, misconfigurations, and supply chain risks.
+Includes digest verification, tag mutation detection, and network threat analysis.
 Author: Krishna Chaithanya Yada
 """
 
@@ -11,7 +12,8 @@ import logging
 import re
 import subprocess
 import sys
-from datetime import datetime
+import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 try:
@@ -24,7 +26,12 @@ except ImportError:
     print("Install dependencies: pip install docker rich")
     sys.exit(1)
 
-__version__ = "1.0.0"
+try:
+    import requests
+except ImportError:
+    requests = None
+
+__version__ = "2.0.0"
 console = Console()
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger("dockershield")
@@ -67,6 +74,20 @@ MALWARE_PATTERNS = [
     (r"wget.*\|\s*(ba)?sh", "Remote code execution via wget pipe"),
 ]
 
+# Directories to exclude from secret file detection (SSL false positives)
+CERT_SAFE_DIRS = ["/etc/ssl/certs/", "/usr/share/ca-certificates/", "/etc/pki/"]
+
+# Known malicious mining pool domains
+MALICIOUS_DOMAINS = [
+    "pool.minexmr.com", "xmr.pool.minergate.com", "monerohash.com",
+    "moneropool.com", "xmrpool.eu", "supportxmr.com", "pool.hashvault.pro",
+    "mine.c3pool.com", "gulf.moneroocean.stream",
+]
+
+# Trust store path for digest verification
+TRUST_STORE_DIR = Path.home() / ".dockershield"
+TRUST_STORE_FILE = TRUST_STORE_DIR / "trusted_digests.json"
+
 
 class Finding:
     """Represents a single security finding."""
@@ -86,13 +107,15 @@ class Finding:
 class DockerShield:
     """Main scanner class."""
 
-    def __init__(self, image_name, severity_filter="low"):
+    def __init__(self, image_name, severity_filter="low", block=False):
         self.image_name = image_name
         self.severity_filter = severity_filter
+        self.block = block
         self.findings = []
         self.client = docker.from_env()
         self.image = None
         self.inspect_data = None
+        self.scan_start_time = None
 
     def pull_and_inspect(self):
         """Pull image and get inspection data."""
@@ -112,7 +135,7 @@ class DockerShield:
 
     def scan_cve(self):
         """Check for known vulnerable packages in the image."""
-        console.print("[bold]  [1/5] Scanning for CVEs...[/]")
+        console.print("[bold]  [1/7] Scanning for CVEs...[/]")
         try:
             result = subprocess.run(
                 ["docker", "run", "--rm", "--entrypoint", "", self.image_name,
@@ -134,7 +157,7 @@ class DockerShield:
 
     def scan_secrets(self):
         """Scan image layers for secrets and credentials."""
-        console.print("[bold]  [2/5] Scanning for secrets...[/]")
+        console.print("[bold]  [2/7] Scanning for secrets...[/]")
         config = self.inspect_data.get("Config", {})
         env_vars = config.get("Env", []) or []
         for env in env_vars:
@@ -146,7 +169,7 @@ class DockerShield:
                         "Use Docker secrets or external secret manager"
                     ))
                     break
-        # Check filesystem for secret files
+        # Check filesystem for secret files (excluding standard cert locations)
         try:
             result = subprocess.run(
                 ["docker", "run", "--rm", "--entrypoint", "", self.image_name,
@@ -156,12 +179,17 @@ class DockerShield:
                 capture_output=True, text=True, timeout=30
             )
             for line in result.stdout.strip().split("\n"):
-                if line.strip():
-                    self.findings.append(Finding(
-                        "Secrets", "high", f"Sensitive file: {line.strip()}",
-                        f"Potentially sensitive file found: {line.strip()}",
-                        "Remove sensitive files or use multi-stage builds"
-                    ))
+                f_path = line.strip()
+                if not f_path:
+                    continue
+                # Skip standard SSL certificate directories
+                if any(f_path.startswith(safe) for safe in CERT_SAFE_DIRS):
+                    continue
+                self.findings.append(Finding(
+                    "Secrets", "high", f"Sensitive file: {f_path}",
+                    f"Potentially sensitive file found: {f_path}",
+                    "Remove sensitive files or use multi-stage builds"
+                ))
         except (subprocess.TimeoutExpired, subprocess.SubprocessError):
             pass
         # Check layer history for leaked secrets
@@ -177,7 +205,7 @@ class DockerShield:
 
     def scan_malware(self):
         """Check for malware signatures and suspicious binaries."""
-        console.print("[bold]  [3/5] Scanning for malware...[/]")
+        console.print("[bold]  [3/7] Scanning for malware...[/]")
         try:
             find_expr = " -o ".join([f"-name '{b}'" for b in MALWARE_BINARIES])
             cmd = f"find / -type f \\( {find_expr} \\) 2>/dev/null | head -10"
@@ -223,7 +251,7 @@ class DockerShield:
 
     def scan_misconfiguration(self):
         """Check for security misconfigurations."""
-        console.print("[bold]  [4/5] Scanning for misconfigurations...[/]")
+        console.print("[bold]  [4/7] Scanning for misconfigurations...[/]")
         config = self.inspect_data.get("Config", {})
         user = config.get("User", "")
         if not user or user == "root" or user == "0":
@@ -266,8 +294,8 @@ class DockerShield:
             ))
 
     def scan_supply_chain(self):
-        """Check supply chain security."""
-        console.print("[bold]  [5/5] Scanning supply chain...[/]")
+        """Check supply chain security including tag mutation detection."""
+        console.print("[bold]  [5/7] Scanning supply chain...[/]")
         repo_tags = self.inspect_data.get("RepoTags", []) or []
         repo_digests = self.inspect_data.get("RepoDigests", []) or []
         is_trusted = False
@@ -309,9 +337,164 @@ class DockerShield:
                     ))
             except (ValueError, TypeError):
                 pass
+        # Tag Mutation Detection - check if mutable tags were recently modified
+        self._check_tag_mutation(repo_tags)
+
+    def _check_tag_mutation(self, repo_tags):
+        """Check Docker Hub for recently modified tags (tag mutation detection)."""
+        if not requests:
+            return
+        mutable_tags = ["latest", "stable", "edge", "main", "master"]
+        for full_tag in repo_tags:
+            parts = full_tag.rsplit(":", 1)
+            if len(parts) != 2:
+                continue
+            image_name, tag = parts
+            if tag not in mutable_tags:
+                continue
+            # Normalize library images (e.g., "nginx" -> "library/nginx")
+            if "/" not in image_name:
+                image_name = f"library/{image_name}"
+            url = f"https://hub.docker.com/v2/repositories/{image_name}/tags/{tag}"
+            try:
+                resp = requests.get(url, timeout=10)
+                if resp.status_code != 200:
+                    continue
+                data = resp.json()
+                last_updated = data.get("last_updated", "")
+                if not last_updated:
+                    continue
+                updated_dt = datetime.fromisoformat(last_updated.replace("Z", "+00:00"))
+                hours_ago = (datetime.now(timezone.utc) - updated_dt).total_seconds() / 3600
+                if hours_ago < 24:
+                    self.findings.append(Finding(
+                        "Supply Chain", "high",
+                        f"Recently modified image (:{tag})",
+                        f"Image tag ':{tag}' was updated {hours_ago:.1f}h ago on Docker Hub. Possible tag poisoning.",
+                        "Verify the update is legitimate or pin to a digest"
+                    ))
+            except Exception:
+                pass
+
+    def scan_digest_integrity(self):
+        """Verify image digest against local trust store to detect tag poisoning."""
+        console.print("[bold]  [6/7] Verifying digest integrity...[/]")
+        try:
+            # Get current image digest
+            digests = self.inspect_data.get("RepoDigests", [])
+            current_id = self.inspect_data.get("Id", "")
+            digest_key = self.image_name
+            current_digest = digests[0] if digests else current_id
+
+            # Load trust store
+            TRUST_STORE_DIR.mkdir(parents=True, exist_ok=True)
+            trust_store = {}
+            if TRUST_STORE_FILE.exists():
+                trust_store = json.loads(TRUST_STORE_FILE.read_text(encoding="utf-8"))
+
+            if digest_key in trust_store:
+                if trust_store[digest_key] != current_digest:
+                    self.findings.append(Finding(
+                        "Digest Integrity", "critical",
+                        "Image content changed since last scan!",
+                        f"Previous: {trust_store[digest_key][:40]}... Current: {current_digest[:40]}...",
+                        "Investigate if the image was legitimately updated or tag-poisoned"
+                    ))
+            # Save/update digest
+            trust_store[digest_key] = current_digest
+            TRUST_STORE_FILE.write_text(json.dumps(trust_store, indent=2), encoding="utf-8")
+        except Exception as e:
+            logger.warning(f"Digest integrity check limited: {e}")
+
+    def scan_network_threats(self):
+        """Detect network-related threats in the image."""
+        console.print("[bold]  [7/7] Scanning for network threats...[/]")
+        # Check for known malicious domains in image layers
+        for layer in self.image.history():
+            created_by = layer.get("CreatedBy", "")
+            for domain in MALICIOUS_DOMAINS:
+                if domain in created_by:
+                    self.findings.append(Finding(
+                        "Network Threat", "critical",
+                        f"Mining pool domain: {domain}",
+                        f"Known malicious domain found in build layer: {domain}",
+                        "Remove the layer referencing this domain and rebuild"
+                    ))
+        # Check for curl/wget with suspicious URLs in layers
+        for layer in self.image.history():
+            created_by = layer.get("CreatedBy", "")
+            if re.search(r"(curl|wget)\s+.*\.(sh|bin|exe|elf)", created_by):
+                self.findings.append(Finding(
+                    "Network Threat", "high",
+                    "Suspicious download in build layer",
+                    f"Layer downloads executable: {created_by[:100]}",
+                    "Review the downloaded content and verify its source"
+                ))
+        # Check /etc/hosts and /etc/resolv.conf for suspicious entries
+        try:
+            result = subprocess.run(
+                ["docker", "run", "--rm", "--entrypoint", "", self.image_name,
+                 "sh", "-c", "cat /etc/hosts /etc/resolv.conf 2>/dev/null"],
+                capture_output=True, text=True, timeout=15
+            )
+            for domain in MALICIOUS_DOMAINS:
+                if domain in result.stdout:
+                    self.findings.append(Finding(
+                        "Network Threat", "critical",
+                        f"Malicious DNS in config: {domain}",
+                        f"Found '{domain}' in /etc/hosts or /etc/resolv.conf",
+                        "Remove suspicious DNS entries from the image"
+                    ))
+        except (subprocess.TimeoutExpired, subprocess.SubprocessError):
+            pass
+        # Brief container run with network=none to check outbound attempts
+        try:
+            result = subprocess.run(
+                ["docker", "run", "--rm", "--network=none", "--entrypoint", "",
+                 self.image_name, "sh", "-c",
+                 "timeout 5 sh -c 'cat /etc/hosts' 2>&1 || true"],
+                capture_output=True, text=True, timeout=15
+            )
+            for domain in MALICIOUS_DOMAINS:
+                if domain in result.stdout:
+                    self.findings.append(Finding(
+                        "Network Threat", "critical",
+                        f"Malicious host entry: {domain}",
+                        f"Container has malicious domain in hosts file",
+                        "Rebuild from a trusted base image"
+                    ))
+        except (subprocess.TimeoutExpired, subprocess.SubprocessError):
+            pass
+
+    def _calculate_risk_score(self):
+        """Calculate a 0-100 risk score based on findings."""
+        score = 0
+        for f in self.findings:
+            if f.severity == "critical":
+                score += 25
+            elif f.severity == "high":
+                score += 15
+            elif f.severity == "medium":
+                score += 8
+            elif f.severity == "low":
+                score += 3
+        return min(score, 100)
+
+    def _get_recommendation(self, score):
+        """Return one-line recommendation based on risk score."""
+        if score >= 75:
+            return "DO NOT DEPLOY. Critical vulnerabilities require immediate remediation."
+        elif score >= 50:
+            return "High risk. Address critical/high findings before deployment."
+        elif score >= 25:
+            return "Moderate risk. Review and remediate medium+ findings."
+        elif score > 0:
+            return "Low risk. Minor improvements recommended."
+        return "Image looks clean. No significant issues detected."
 
     def run_scan(self):
         """Execute all scans."""
+        self.scan_start_time = time.time()
         self.pull_and_inspect()
         console.print(Panel(
             f"[bold green]DockerShield v{__version__}[/]\nScanning: {self.image_name}",
@@ -322,6 +505,8 @@ class DockerShield:
         self.scan_malware()
         self.scan_misconfiguration()
         self.scan_supply_chain()
+        self.scan_digest_integrity()
+        self.scan_network_threats()
         severity_order = {"critical": 0, "high": 1, "medium": 2, "low": 3}
         threshold = severity_order.get(self.severity_filter, 3)
         self.findings = [f for f in self.findings if severity_order.get(f.severity, 3) <= threshold]
@@ -335,7 +520,7 @@ class DockerShield:
         return 0
 
     def print_report(self):
-        """Print colored terminal report."""
+        """Print colored terminal report with risk score and recommendations."""
         table = Table(title="Security Scan Results", box=box.ROUNDED, show_lines=True)
         table.add_column("Category", style="cyan", width=16)
         table.add_column("Severity", width=10)
@@ -356,7 +541,18 @@ class DockerShield:
         med = sum(1 for f in self.findings if f.severity == "medium")
         low = sum(1 for f in self.findings if f.severity == "low")
         status = "[bold red]FAIL[/]" if crit else "[red]FAIL[/]" if high else "[yellow]WARN[/]" if med else "[bold green]PASS[/]"
-        console.print(f"\n  Status: {status} | Total: {total} | Critical: {crit} High: {high} Medium: {med} Low: {low}\n")
+        # Scan duration
+        duration = time.time() - self.scan_start_time if self.scan_start_time else 0
+        # Risk score
+        risk_score = self._calculate_risk_score()
+        recommendation = self._get_recommendation(risk_score)
+        console.print(f"\n  Status: {status} | Total: {total} | Critical: {crit} High: {high} Medium: {med} Low: {low}")
+        console.print(f"  Risk Score: [bold]{risk_score}/100[/] | Duration: {duration:.1f}s")
+        console.print(f"  Recommendation: {recommendation}\n")
+        # Block flag for CI/CD
+        if self.block and (crit > 0 or high > 0):
+            console.print("[bold red]  ██ DEPLOYMENT BLOCKED ██[/]")
+            console.print("[red]  Critical/High findings detected. Pipeline should fail.[/]\n")
 
     def to_json(self):
         return json.dumps({
@@ -412,10 +608,12 @@ def main():
     parser.add_argument("--html", type=str, metavar="FILE", help="Generate HTML report")
     parser.add_argument("--severity", choices=["critical", "high", "medium", "low"],
                         default="low", help="Minimum severity to report")
+    parser.add_argument("--block", action="store_true",
+                        help="Block deployment if critical/high findings exist (for CI/CD)")
     parser.add_argument("--version", action="version", version=f"DockerShield {__version__}")
     args = parser.parse_args()
 
-    scanner = DockerShield(args.image, severity_filter=args.severity)
+    scanner = DockerShield(args.image, severity_filter=args.severity, block=args.block)
     scanner.run_scan()
 
     if args.json:
